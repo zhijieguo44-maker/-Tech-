@@ -2,6 +2,7 @@ import { useRef, useState, type KeyboardEvent } from "react";
 import type { ChatMessage } from "../shared/chat.ts";
 import { requestReply } from "./chat-client.ts";
 import { ChatHistory } from "./ChatHistory.tsx";
+import { TaskPanel } from "./TaskPanel.tsx";
 
 function isSendShortcut(event: KeyboardEvent<HTMLTextAreaElement>) {
   // 中文输入法会用 Enter 确认选词，部分浏览器此时只报告键码 229。
@@ -14,6 +15,8 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  // 每收到一次回复就加一，让任务面板重新读取清单。
+  const [turn, setTurn] = useState(0);
   const input = useRef<HTMLTextAreaElement>(null);
 
   async function send(text: string) {
@@ -32,6 +35,8 @@ export default function App() {
       setDraft(text);
       setError(cause instanceof Error ? `发送失败：${cause.message}` : "发送失败，请重试。");
     } finally {
+      // 即使回复失败，清单也可能已经被改动，所以同样刷新。
+      setTurn((count) => count + 1);
       setPending(false);
       requestAnimationFrame(() => input.current?.focus());
     }
@@ -45,40 +50,43 @@ export default function App() {
         <span>小明智能体</span>
       </header>
       <main>
-        <ChatHistory messages={messages} pending={pending} onSelectPrompt={send} />
-        <div className="compose">
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void send(draft);
-            }}
-          >
-            <textarea
-              aria-label="消息"
-              ref={input}
-              placeholder="输入消息…"
-              rows={2}
-              value={draft}
-              readOnly={pending}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (isSendShortcut(event)) {
-                  event.preventDefault();
-                  void send(draft);
-                }
+        <section className="chat">
+          <ChatHistory messages={messages} pending={pending} onSelectPrompt={send} />
+          <div className="compose">
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void send(draft);
               }}
-            />
-            <button className="send" disabled={pending || !draft.trim()} aria-label="发送消息">
-              ↑
-            </button>
-          </form>
-          <small>Enter 发送 · Shift + Enter 换行</small>
-        </div>
+            >
+              <textarea
+                aria-label="消息"
+                ref={input}
+                placeholder="输入消息…"
+                rows={2}
+                value={draft}
+                readOnly={pending}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (isSendShortcut(event)) {
+                    event.preventDefault();
+                    void send(draft);
+                  }
+                }}
+              />
+              <button className="send" disabled={pending || !draft.trim()} aria-label="发送消息">
+                ↑
+              </button>
+            </form>
+            <small>Enter 发送 · Shift + Enter 换行</small>
+          </div>
+        </section>
+        <TaskPanel refreshKey={turn} />
       </main>
     </div>
   );

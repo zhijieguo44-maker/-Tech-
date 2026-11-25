@@ -39,6 +39,7 @@ async function startAgent(t: TestContext, script: Array<ModelReply | Error | (()
   const requests: Parameters<Complete>[0][] = [];
   const reply = createAgent({
     taskApiUrl: `http://127.0.0.1:${port}`,
+    today: () => "2026-11-25",
     async complete(messages) {
       requests.push(structuredClone(messages));
       const next = script.shift();
@@ -62,27 +63,28 @@ test("新增任务并把最新清单交还给模型", async (t) => {
     [{ title: "买牛奶", done: false }],
   );
   assert.match(String(requests[0]?.[0]?.content), /清单是空的/);
-  assert.match(String(requests[1]?.at(-1)?.content), /#1 \[待办\] 买牛奶/);
+  assert.match(String(requests[1]?.at(-1)?.content), /#1 ⬜ 买牛奶/);
 });
 
 test("每轮回复都把当前清单写进系统提示", async (t) => {
   const { ask, tasks, requests } = await startAgent(t, [say("有两条")]);
-  tasks.create("买牛奶");
-  tasks.update(tasks.create("取快递").id, { done: true });
+  tasks.create({ title: "买牛奶" });
+  tasks.update(tasks.create({ title: "取快递" }).id, { done: true });
   await ask("我有哪些任务？");
   const prompt = String(requests[0]?.[0]?.content);
-  assert.match(prompt, /#1 \[待办\] 买牛奶\n#2 \[已完成\] 取快递/);
+  assert.match(prompt, /#1 ⬜ 买牛奶\n#2 ✅ 取快递/);
 });
 
 test("按编号标记完成和删除", async (t) => {
   const { ask, tasks } = await startAgent(t, [
     call("update_task", { number: 1, done: true }),
     say("好的"),
-    call("delete_task", { number: 2 }),
+    // 买牛奶完成后排到了最后，新一轮里「取快递」是 #1。
+    call("delete_task", { number: 1 }),
     say("删掉了"),
   ]);
-  tasks.create("买牛奶");
-  tasks.create("取快递");
+  tasks.create({ title: "买牛奶" });
+  tasks.create({ title: "取快递" });
   await ask("牛奶买好了");
   await ask("取快递这条删掉吧");
   assert.deepEqual(
@@ -97,9 +99,9 @@ test("同一轮里删除任务后，其余任务的编号不变", async (t) => {
     call("delete_task", { number: 2 }),
     say("都删了"),
   ]);
-  tasks.create("买牛奶");
-  tasks.create("取快递");
-  tasks.create("交电费");
+  tasks.create({ title: "买牛奶" });
+  tasks.create({ title: "取快递" });
+  tasks.create({ title: "交电费" });
   await ask("把买牛奶和取快递删掉");
   assert.deepEqual(
     tasks.list().map((task) => task.title),
@@ -120,7 +122,7 @@ test("编号不存在或接口拒绝时把原因交还给模型，不改动清�
     },
     say("没有成功"),
   ]);
-  tasks.create("买牛奶");
+  tasks.create({ title: "买牛奶" });
   assert.equal(await ask("乱来"), "没有成功");
   assert.equal(tasks.list().length, 1);
   const results = requests.slice(1).map((messages) => String(messages.at(-1)?.content));
@@ -140,7 +142,7 @@ test("任务已被别处删除时不会假装成功", async (t) => {
     },
     say("这条任务已经不在了"),
   ]);
-  const task = tasks.create("买牛奶");
+  const task = tasks.create({ title: "买牛奶" });
   removeElsewhere = () => tasks.remove(task.id);
   assert.equal(await ask("牛奶买好了"), "这条任务已经不在了");
   assert.match(String(requests.at(-1)?.at(-1)?.content), /操作失败：找不到这条任务/);
@@ -162,6 +164,83 @@ test("工具调用停不下来时在限定步数后结束", async (t) => {
   const { ask, requests } = await startAgent(t, script);
   assert.match(await ask("看看清单"), /步骤太多/);
   assert.equal(requests.length, 8);
+});
+
+test("新增时带上到期日、优先级、工作量和所属任务", async (t) => {
+  const { ask, tasks, requests } = await startAgent(t, [
+    call("add_task", { title: "准备搬家", due_date: "2026-11-28", priority: "high" }),
+    call("add_task", { title: "打包", effort: "large", parent_number: 1 }),
+    say("好了"),
+  ]);
+  await ask("周六前要准备搬家，很重要，先加个子任务打包，工作量大");
+  const [parent, child] = tasks.list();
+  assert.deepEqual(
+    { ...parent, id: "" },
+    { id: "", title: "准备搬家", done: false, dueDate: "2026-11-28", priority: "high" },
+  );
+  assert.deepEqual(
+    { ...child, id: "" },
+    { id: "", title: "打包", done: false, effort: "large", parentId: parent?.id },
+  );
+  assert.equal(
+    String(requests.at(-1)?.at(-1)?.content),
+    "操作成功。最新清单：\n#1 ⬜ 准备搬家（11月28日到期｜高优先级｜子任务 0/1 完成）\n    #2 ⬜ 打包（工作量大）",
+  );
+});
+
+test("清单按最需要处理的顺序交给模型，并附上今天的日期", async (t) => {
+  const { ask, tasks, requests } = await startAgent(t, [say("好")]);
+  tasks.update(tasks.create({ title: "买牛奶" }).id, { done: true });
+  tasks.create({ title: "读书" });
+  tasks.create({ title: "交报告", dueDate: "2026-11-25" });
+  tasks.create({ title: "交电费", dueDate: "2026-11-23", priority: "high" });
+  tasks.create({ title: "订机票", priority: "low" });
+  await ask("今天有哪些任务到期？");
+  const prompt = String(requests[0]?.[0]?.content);
+  assert.match(prompt, /今天是 2026-11-25 周三。/);
+  assert.match(prompt, /2026-11-27 周五/);
+  assert.ok(
+    prompt.includes(
+      [
+        "#1 ⬜ 交电费（⚠️ 已逾期 2 天｜高优先级）",
+        "#2 ⬜ 交报告（今天到期）",
+        "#3 ⬜ 订机票（低优先级）",
+        "#4 ⬜ 读书",
+        "#5 ✅ 买牛奶",
+      ].join("\n"),
+    ),
+  );
+});
+
+test("用 none 清除到期日和优先级", async (t) => {
+  const { ask, tasks } = await startAgent(t, [
+    call("update_task", { number: 1, due_date: "none", priority: "none", effort: "small" }),
+    say("好"),
+  ]);
+  const task = tasks.create({ title: "交报告", dueDate: "2026-11-25", priority: "high" });
+  await ask("交报告不急了，期限也去掉，工作量小");
+  assert.deepEqual(tasks.list(), [{ id: task.id, title: "交报告", done: false, effort: "small" }]);
+});
+
+test("日期无效时把接口的说明交还给模型", async (t) => {
+  const { ask, tasks, requests } = await startAgent(t, [
+    call("add_task", { title: "交报告", due_date: "2026-02-30" }),
+    say("日期不对"),
+  ]);
+  await ask("2 月 30 号交报告");
+  assert.equal(tasks.list().length, 0);
+  assert.match(String(requests.at(-1)?.at(-1)?.content), /操作失败：到期日需要是 YYYY-MM-DD/);
+});
+
+test("删除带子任务的任务后，模型出错时仍能说出删了什么", async (t) => {
+  const { ask, tasks } = await startAgent(t, [
+    call("delete_task", { number: 1 }),
+    new Error("网络中断"),
+  ]);
+  const parent = tasks.create({ title: "准备搬家" });
+  tasks.create({ title: "打包", parentId: parent.id });
+  assert.match(await ask("搬家不搬了，删掉"), /已删除「准备搬家」/);
+  assert.deepEqual(tasks.list(), []);
 });
 
 test("只把最近的对话交给模型", async (t) => {

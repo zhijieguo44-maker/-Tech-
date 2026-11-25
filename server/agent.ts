@@ -1,5 +1,14 @@
 import type OpenAI from "openai";
 import type { ChatMessage } from "../shared/chat.ts";
+import { efforts, priorities, type Task } from "../shared/task.ts";
+import {
+  arrangeTasks,
+  daysUntil,
+  dueLabel,
+  effortLabels,
+  priorityLabels,
+  todayString,
+} from "../shared/task-view.ts";
 import { getModelClient, model } from "./model.ts";
 
 export type { ChatMessage } from "../shared/chat.ts";
@@ -8,23 +17,21 @@ type ModelMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 type ModelTool = OpenAI.Chat.Completions.ChatCompletionFunctionTool;
 type ModelReply = OpenAI.Chat.Completions.ChatCompletionMessage;
 
-interface Task {
-  id: string;
-  title: string;
-  done: boolean;
-}
-
 export interface AgentDependencies {
   // 向模型发起一次请求，返回模型的回复（可能带有工具调用）。
   complete(messages: ModelMessage[], tools: ModelTool[]): Promise<ModelReply>;
   // 任务 API 的地址，例如 http://127.0.0.1:3000
   taskApiUrl: string;
+  // 返回今天的日期（YYYY-MM-DD），默认取服务器本地日期；测试时可以固定。
+  today?: () => string;
 }
 
 // 只把最近的对话交给模型，避免长对话不断增加费用。清单本身每轮从任务 API 重新读取，不依赖历史。
 const MAX_HISTORY = 30;
 // 一轮回复里最多与模型往返的次数，防止工具调用陷入死循环。
 const MAX_STEPS = 8;
+
+const numberParameter = { type: "integer", description: "清单中的任务编号，例如 #2 就填 2。" };
 
 const tools: ModelTool[] = [
   {
@@ -39,13 +46,21 @@ const tools: ModelTool[] = [
     type: "function",
     function: {
       name: "add_task",
-      description: "新增一条待办任务。一次只新增一条；用户一句话里说了多件事时，分别调用。",
+      description:
+        "新增一条待办任务或子任务。一次只新增一条；用户一句话里说了多件事时，分别调用。到期日、优先级、工作量只在用户提到时才填。",
       parameters: {
         type: "object",
         properties: {
           title: {
             type: "string",
             description: "任务标题，只保留事情本身，例如「买牛奶」。最长 200 个字符。",
+          },
+          due_date: { type: "string", description: "到期日，格式 YYYY-MM-DD。" },
+          priority: { type: "string", enum: [...priorities], description: "优先级：高、中、低。" },
+          effort: { type: "string", enum: [...efforts], description: "工作量：小、中、大。" },
+          parent_number: {
+            type: "integer",
+            description: "新增子任务时填所属任务的编号；普通任务不要填。",
           },
         },
         required: ["title"],
@@ -57,13 +72,21 @@ const tools: ModelTool[] = [
     type: "function",
     function: {
       name: "update_task",
-      description: "修改一条任务：标记为已完成、恢复为待办，或者修改标题。",
+      description:
+        "修改一条任务或子任务：标记完成、恢复为待办、改标题、设置或清除到期日、优先级、工作量。只填需要改的字段。",
       parameters: {
         type: "object",
         properties: {
-          number: { type: "integer", description: "清单中的任务编号，例如 #2 就填 2。" },
+          number: numberParameter,
           done: { type: "boolean", description: "true 表示已完成，false 表示恢复为待办。" },
           title: { type: "string", description: "新的任务标题。" },
+          due_date: { type: "string", description: "新的到期日 YYYY-MM-DD；填 none 表示清除。" },
+          priority: {
+            type: "string",
+            enum: [...priorities, "none"],
+            description: "none 表示清除。",
+          },
+          effort: { type: "string", enum: [...efforts, "none"], description: "none 表示清除。" },
         },
         required: ["number"],
         additionalProperties: false,
@@ -74,12 +97,10 @@ const tools: ModelTool[] = [
     type: "function",
     function: {
       name: "delete_task",
-      description: "从清单中删除一条任务。删除后无法恢复。",
+      description: "删除一条任务或子任务。删除任务会连同它的子任务一起删除，无法恢复。",
       parameters: {
         type: "object",
-        properties: {
-          number: { type: "integer", description: "清单中的任务编号，例如 #2 就填 2。" },
-        },
+        properties: { number: numberParameter },
         required: ["number"],
         additionalProperties: false,
       },
@@ -87,21 +108,55 @@ const tools: ModelTool[] = [
   },
 ];
 
-function systemPrompt(listText: string) {
+const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+// 把未来两周的日期和星期直接列给模型，避免它自己推算「下周五是几号」时算错。
+function calendar(today: string) {
+  const start = Date.parse(today + "T00:00:00Z");
+  return Array.from({ length: 15 }, (_, offset) => {
+    const date = new Date(start + offset * 86_400_000);
+    return `${date.toISOString().slice(0, 10)} ${weekdays[date.getUTCDay()]}`;
+  });
+}
+
+function systemPrompt(listText: string, today: string) {
+  const [first, ...rest] = calendar(today);
   return `你是「小明」，一个帮用户管理待办清单的中文助手。用户用日常口语说话，你通过工具操作清单，然后用简短、自然的中文回复。
+
+# 今天
+今天是 ${first}。之后两周：${rest.join("，")}。
+用户说「明天」「周五」「下周一」时，对照上面的日历换算成具体日期。
 
 # 当前清单
 ${listText}
 
-这是本轮对话开始时从数据库读到的最新清单。对话历史里你以前说过的清单可能已经过时，以这里和工具返回的结果为准。
+这是本轮对话开始时从数据库读到的最新清单，已经按「最需要处理的在前」排好：逾期和快到期的在最前，已完成的在最后，子任务缩进在所属任务下面。对话历史里你以前说过的清单可能已经过时，以这里和工具返回的结果为准。
 
 # 怎么做
-- 用户想记下一件事（「帮我记一下…」「提醒我…」「再记一条…」）：调用 add_task。标题只保留事情本身，去掉「帮我记一下」之类的话。
+- 用户想记下一件事（「帮我记一下…」「提醒我…」「再记一条…」）：调用 add_task。标题只保留事情本身，去掉「帮我记一下」「明天」「很重要」这类已经用其他字段表达的词。
 - 用户表示某件事做完了（「牛奶买好了」「快递取了」）：找到对应的任务，调用 update_task 把 done 设为 true。
 - 用户想删除任务（「…删掉吧」「不用了」）：找到对应的任务，调用 delete_task。
 - 用户想看清单（「我有哪些任务？」「看看清单」）：直接根据最新清单回答，不需要调用工具。
 - 用户的说法和任务标题不必完全一致，按意思匹配，例如「牛奶买好了」对应「买牛奶」。
 - 一句话里有多个操作时，逐个调用工具全部完成。
+
+# 到期日
+- 用户提到期限（「明天交」「周五前」「30 号之前」）时填 due_date。到期日只精确到天；用户说了具体钟点时，把钟点留在标题里（例如「下午三点开会」）。
+- 期限说不清是哪一天（「下周」「月底前后」「过几天」）时，先问清楚具体日期，不要自己挑一天。
+- 用户给的日期已经过去时，先向用户确认是不是说错了。
+- 用户问「今天有哪些任务到期？」：列出标着「今天到期」的未完成任务；如果还有已逾期的任务，另起一段提醒。两者都没有就直接说今天没有到期的任务。已完成的任务不算。
+- 用户问「明天」「这周」到期的任务时同理，按清单里的到期日筛选。
+
+# 优先级和工作量
+- 优先级分高、中、低，工作量分小、中、大。用户明确表达时才设置（「很重要」「紧急」是高，「不着急」是低；「几分钟就好」是小，「得花一整天」是大），没提就不填，不要替用户猜。
+- 用户问「先做哪个」「有什么能很快做完的」时，根据到期日、优先级和工作量给出建议并说明理由。
+
+# 子任务
+- 用户要把一件事拆开，或者说「给 X 加个子任务 Y」时，用 add_task 并填 parent_number。所属任务不存在时先建所属任务，再逐条建子任务。
+- 子任务只有一层：不能给子任务再加子任务，遇到这种要求时向用户说明，并建议改成同一任务下的另一条子任务。
+- 把任务标记为完成会连同它的子任务一起完成；把子任务恢复为待办会让所属任务也回到待办。发生这种连带变化时要告诉用户。
+- 某条任务的子任务全部完成、它自己还是待办时，问用户要不要把它也标记为完成，不要自己决定。
+- 删除带子任务的任务会把子任务一起删掉，删之前先向用户确认。
 
 # 拿不准的时候
 - 有多条任务都可能是用户指的那条：不要猜，列出候选让用户选。
@@ -114,11 +169,32 @@ ${listText}
 
 # 回复格式
 - 界面只显示纯文本，不要使用 Markdown（不要用 **、#、表格）。
-- 展示清单时每条任务一行，先列待办再列已完成，待办用「⬜」开头，已完成用「✅」开头，例如：
-⬜ 取快递
+- 展示清单时照抄「当前清单」或工具返回的最新清单里的行：保持顺序、符号、括号里的说明和子任务的缩进，只去掉行首的编号。例如清单里是
+#1 ⬜ 交电费（⚠️ 已逾期 2 天｜高优先级）
+#2 ✅ 买牛奶
+就回复
+⬜ 交电费（⚠️ 已逾期 2 天｜高优先级）
 ✅ 买牛奶
+- 用户只问一部分（今天到期的、还没做的、某条任务的子任务）时，只列相关的行。
+- 清单里有逾期或今天到期的任务时，展示完清单用一句话提醒。
 - 清单为空时直接说明现在没有任务。
 - 不要向用户展示任务编号（#1 这样的编号只供你调用工具使用）和内部 id。`;
+}
+
+// 给模型看的清单：一行一条，行首是本轮的任务编号，括号里是需要注意的信息。
+function describeTask(task: Task, number: number, subtasks: Task[], today: string) {
+  const notes: string[] = [];
+  if (!task.done) {
+    const due = dueLabel(task, today);
+    if (due) notes.push(task.dueDate && daysUntil(task.dueDate, today) < 0 ? "⚠️ " + due : due);
+    if (task.priority) notes.push(priorityLabels[task.priority] + "优先级");
+    if (task.effort) notes.push("工作量" + effortLabels[task.effort]);
+  }
+  if (subtasks.length > 0) {
+    notes.push(`子任务 ${subtasks.filter((item) => item.done).length}/${subtasks.length} 完成`);
+  }
+  const suffix = notes.length ? `（${notes.join("｜")}）` : "";
+  return `#${number} ${task.done ? "✅" : "⬜"} ${task.title}${suffix}`;
 }
 
 function errorMessage(error: unknown) {
@@ -137,7 +213,7 @@ function parseArguments(text: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-export function createAgent({ complete, taskApiUrl }: AgentDependencies) {
+export function createAgent({ complete, taskApiUrl, today = todayString }: AgentDependencies) {
   async function callTaskApi(method: string, path: string, body?: unknown) {
     const response = await fetch(taskApiUrl + path, {
       method,
@@ -162,14 +238,27 @@ export function createAgent({ complete, taskApiUrl }: AgentDependencies) {
     // 本轮已经成功执行的操作，模型中途出错时用来告诉用户哪些已经生效。
     const finished: string[] = [];
 
+    // 一轮回复内「今天」固定不变，避免跨零点时前后说法不一致。
+    const date = today();
+    const titles = new Map<string, string>();
+
     async function readList() {
       const tasks = (await callTaskApi("GET", "/api/tasks")) as Task[];
-      for (const task of tasks) if (!ids.includes(task.id)) ids.push(task.id);
+      const arranged = arrangeTasks(tasks, date);
+      // 第一次读取时按展示顺序编号，之后新出现的任务接着往后编。
+      for (const { task, subtasks } of arranged) {
+        for (const item of [task, ...subtasks]) {
+          if (!ids.includes(item.id)) ids.push(item.id);
+          titles.set(item.id, item.title);
+        }
+      }
       if (tasks.length === 0) return "（清单是空的）";
-      return tasks
-        .map(
-          (task) => `#${ids.indexOf(task.id) + 1} [${task.done ? "已完成" : "待办"}] ${task.title}`,
-        )
+      const number = (task: Task) => ids.indexOf(task.id) + 1;
+      return arranged
+        .flatMap(({ task, subtasks }) => [
+          describeTask(task, number(task), subtasks, date),
+          ...subtasks.map((item) => "    " + describeTask(item, number(item), [], date)),
+        ])
         .join("\n");
     }
 
@@ -179,23 +268,32 @@ export function createAgent({ complete, taskApiUrl }: AgentDependencies) {
       return id;
     }
 
+    // 工具参数里用 none 表示清除，任务 API 用 null。
+    const clearable = (value: unknown) => (value === "none" ? null : value);
+
     async function runTool(name: string, args: Record<string, unknown>) {
       if (name === "add_task") {
-        const task = (await callTaskApi("POST", "/api/tasks", { title: args.title })) as Task;
+        const input: Record<string, unknown> = { title: args.title };
+        if (args.due_date !== undefined) input.dueDate = args.due_date;
+        if (args.priority !== undefined) input.priority = args.priority;
+        if (args.effort !== undefined) input.effort = args.effort;
+        if (args.parent_number !== undefined) input.parentId = findId(args.parent_number);
+        const task = (await callTaskApi("POST", "/api/tasks", input)) as Task;
         finished.push(`已添加「${task.title}」`);
       } else if (name === "update_task") {
-        const changes: { title?: unknown; done?: unknown } = {};
+        const changes: Record<string, unknown> = {};
         if (args.title !== undefined) changes.title = args.title;
         if (args.done !== undefined) changes.done = args.done;
-        const task = (await callTaskApi(
-          "PATCH",
-          "/api/tasks/" + encodeURIComponent(findId(args.number)),
-          changes,
-        )) as Task;
-        finished.push(`已把「${task.title}」更新为${task.done ? "已完成" : "待办"}`);
+        if (args.due_date !== undefined) changes.dueDate = clearable(args.due_date);
+        if (args.priority !== undefined) changes.priority = clearable(args.priority);
+        if (args.effort !== undefined) changes.effort = clearable(args.effort);
+        const path = "/api/tasks/" + encodeURIComponent(findId(args.number));
+        const task = (await callTaskApi("PATCH", path, changes)) as Task;
+        finished.push(`已更新「${task.title}」`);
       } else if (name === "delete_task") {
-        await callTaskApi("DELETE", "/api/tasks/" + encodeURIComponent(findId(args.number)));
-        finished.push(`已删除第 ${String(args.number)} 条任务`);
+        const id = findId(args.number);
+        await callTaskApi("DELETE", "/api/tasks/" + encodeURIComponent(id));
+        finished.push(`已删除「${titles.get(id) ?? "任务"}」`);
       } else if (name !== "list_tasks") {
         throw new Error(`没有名为 ${name} 的工具。`);
       }
@@ -215,7 +313,7 @@ export function createAgent({ complete, taskApiUrl }: AgentDependencies) {
     }
 
     const conversation: ModelMessage[] = [
-      { role: "system", content: systemPrompt(listText) },
+      { role: "system", content: systemPrompt(listText, date) },
       ...messages.slice(-MAX_HISTORY),
     ];
 

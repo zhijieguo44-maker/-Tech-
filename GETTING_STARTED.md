@@ -31,6 +31,9 @@ npm run dev
 | [server/app.ts](server/app.ts)               | 接收对话历史，调用智能体并挂载任务 API     |
 | [server/task-store.ts](server/task-store.ts) | 读写本地 JSON 任务清单                     |
 | [server/openapi.yaml](server/openapi.yaml)   | 任务请求和响应的完整定义                   |
+| [shared/task.ts](shared/task.ts)             | 任务字段的类型与校验，前后端共用           |
+| [shared/task-view.ts](shared/task-view.ts)   | 清单的排序与到期提示，智能体和界面共用     |
+| [src/TaskPanel.tsx](src/TaskPanel.tsx)       | 聊天旁的任务面板                           |
 
 ## 手动验证接口
 

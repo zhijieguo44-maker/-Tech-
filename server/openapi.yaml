@@ -1,14 +1,14 @@
 openapi: 3.1.0
 info:
   title: 小明智能体任务 API
-  version: 1.0.0
+  version: 1.1.0
 servers:
   - url: http://127.0.0.1:3000
 paths:
   /api/tasks:
     get:
       operationId: listTasks
-      summary: 按创建顺序列出全部任务，包括已完成任务
+      summary: 按创建顺序列出全部任务，包括已完成任务和子任务
       responses:
         "200":
           description: 任务列表；空列表为 []
@@ -19,7 +19,8 @@ paths:
                 items: { $ref: "#/components/schemas/Task" }
     post:
       operationId: createTask
-      summary: 创建一条未完成任务
+      summary: 创建一条未完成任务；带 parentId 时创建子任务
+      description: 给已完成的任务添加子任务后，该任务会回到未完成。
       requestBody:
         required: true
         content:
@@ -30,6 +31,12 @@ paths:
               required: [title]
               properties:
                 title: { $ref: "#/components/schemas/Title" }
+                dueDate: { $ref: "#/components/schemas/DueDate" }
+                priority: { $ref: "#/components/schemas/Priority" }
+                effort: { $ref: "#/components/schemas/Effort" }
+                parentId:
+                  type: string
+                  description: 所属任务的 id。所属任务本身不能是子任务（子任务只有一层）
       responses:
         "201":
           description: 新建的任务
@@ -37,6 +44,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Task" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: parentId 指向的任务不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/tasks/{id}:
     parameters:
       - name: id
@@ -45,7 +57,11 @@ paths:
         schema: { type: string }
     patch:
       operationId: updateTask
-      summary: 修改标题或完成状态
+      summary: 修改标题、完成状态、到期日、优先级或工作量
+      description: |
+        dueDate、priority、effort 传 null 表示清除。不能修改 parentId。
+        把任务标记为完成会同时完成它的全部子任务；把子任务改回未完成会让所属任务也回到未完成。
+        子任务全部完成不会自动完成所属任务。
       requestBody:
         required: true
         content:
@@ -57,6 +73,12 @@ paths:
               properties:
                 title: { $ref: "#/components/schemas/Title" }
                 done: { type: boolean }
+                dueDate:
+                  oneOf: [{ $ref: "#/components/schemas/DueDate" }, { type: "null" }]
+                priority:
+                  oneOf: [{ $ref: "#/components/schemas/Priority" }, { type: "null" }]
+                effort:
+                  oneOf: [{ $ref: "#/components/schemas/Effort" }, { type: "null" }]
       responses:
         "200":
           description: 更新后的任务
@@ -67,7 +89,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       operationId: deleteTask
-      summary: 删除一条任务
+      summary: 删除一条任务，连同它的全部子任务
       responses:
         "204":
           description: 删除成功，响应体为空
@@ -79,13 +101,33 @@ components:
       description: 首尾空白会自动去除，去除后长度应为 1 至 200
       minLength: 1
       maxLength: 200
+    DueDate:
+      type: string
+      format: date
+      description: 到期日，只精确到天，格式 YYYY-MM-DD，必须是真实存在的日期
+      example: "2026-11-28"
+    Priority:
+      type: string
+      enum: [high, medium, low]
+      description: 优先级
+    Effort:
+      type: string
+      enum: [small, medium, large]
+      description: 工作量
     Task:
       type: object
       required: [id, title, done]
+      description: 未设置的可选字段不会出现在响应中
       properties:
         id: { type: string, format: uuid }
         title: { $ref: "#/components/schemas/Title" }
         done: { type: boolean }
+        dueDate: { $ref: "#/components/schemas/DueDate" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        effort: { $ref: "#/components/schemas/Effort" }
+        parentId:
+          type: string
+          description: 仅子任务有此字段，值为所属任务的 id
     Error:
       type: object
       required: [error]
