@@ -13,7 +13,6 @@ import {
 import { requestTasks } from "./chat-client.ts";
 
 interface TaskPanelProps {
-  // 值变化时重新读取清单。
   refreshKey: number;
 }
 
@@ -88,7 +87,6 @@ function TaskGroup({ title, nodes, today }: { title: string; nodes: TaskNode[]; 
 export function TaskPanel({ refreshKey }: TaskPanelProps) {
   const [tasks, setTasks] = useState<Task[]>();
   const [failed, setFailed] = useState(false);
-  // 窄屏上默认收起，不挤占聊天区域。
   const [open, setOpen] = useState(() => window.matchMedia("(min-width: 900px)").matches);
 
   useEffect(() => {
@@ -103,7 +101,6 @@ export function TaskPanel({ refreshKey }: TaskPanelProps) {
         () => current && setFailed(true),
       );
     void load();
-    // 清单也可能在别的页面被修改，回到这个页面时重新读取。
     window.addEventListener("focus", load);
     return () => {
       current = false;

@@ -18,17 +18,12 @@ type ModelTool = OpenAI.Chat.Completions.ChatCompletionFunctionTool;
 type ModelReply = OpenAI.Chat.Completions.ChatCompletionMessage;
 
 export interface AgentDependencies {
-  // 向模型发起一次请求，返回模型的回复（可能带有工具调用）。
   complete(messages: ModelMessage[], tools: ModelTool[]): Promise<ModelReply>;
-  // 任务 API 的地址，例如 http://127.0.0.1:3000
   taskApiUrl: string;
-  // 返回今天的日期（YYYY-MM-DD），默认取服务器本地日期；测试时可以固定。
   today?: () => string;
 }
 
-// 只把最近的对话交给模型，避免长对话不断增加费用。清单本身每轮从任务 API 重新读取，不依赖历史。
 const MAX_HISTORY = 30;
-// 一轮回复里最多与模型往返的次数，防止工具调用陷入死循环。
 const MAX_STEPS = 8;
 
 const numberParameter = { type: "integer", description: "清单中的任务编号，例如 #2 就填 2。" };
@@ -110,7 +105,6 @@ const tools: ModelTool[] = [
 
 const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-// 把未来两周的日期和星期直接列给模型，避免它自己推算「下周五是几号」时算错。
 function calendar(today: string) {
   const start = Date.parse(today + "T00:00:00Z");
   return Array.from({ length: 15 }, (_, offset) => {
@@ -188,7 +182,6 @@ ${listText}
 - 不要向用户展示任务编号（#1 这样的编号只供你调用工具使用）和内部 id。`;
 }
 
-// 给模型看的清单：一行一条，行首是本轮的任务编号，括号里是需要注意的信息。
 function describeTask(task: Task, number: number, subtasks: Task[], today: string) {
   const notes: string[] = [];
   if (!task.done) {
@@ -214,9 +207,7 @@ function parseArguments(text: string): Record<string, unknown> | undefined {
     if (typeof value === "object" && value !== null && !Array.isArray(value)) {
       return value as Record<string, unknown>;
     }
-  } catch {
-    // 模型偶尔会生成不完整的 JSON，交给调用方当作参数错误处理。
-  }
+  } catch {}
   return undefined;
 }
 
@@ -239,20 +230,15 @@ export function createAgent({ complete, taskApiUrl, today = todayString }: Agent
   }
 
   return async function reply(messages: ChatMessage[]): Promise<string> {
-    // 任务编号 -> 任务 id。编号在一轮回复内保持不变：删除后不重排，新任务排在最后，
-    // 这样模型连续操作多条任务时不会因为编号移位而改错任务。
     const ids: string[] = [];
-    // 本轮已经成功执行的操作，模型中途出错时用来告诉用户哪些已经生效。
     const finished: string[] = [];
 
-    // 一轮回复内「今天」固定不变，避免跨零点时前后说法不一致。
     const date = today();
     const titles = new Map<string, string>();
 
     async function readList() {
       const tasks = (await callTaskApi("GET", "/api/tasks")) as Task[];
       const arranged = arrangeTasks(tasks, date);
-      // 第一次读取时按展示顺序编号，之后新出现的任务接着往后编。
       for (const { task, subtasks } of arranged) {
         for (const item of [task, ...subtasks]) {
           if (!ids.includes(item.id)) ids.push(item.id);
@@ -275,7 +261,6 @@ export function createAgent({ complete, taskApiUrl, today = todayString }: Agent
       return id;
     }
 
-    // 工具参数里用 none 表示清除，任务 API 用 null。
     const clearable = (value: unknown) => (value === "none" ? null : value);
 
     async function runTool(name: string, args: Record<string, unknown>) {
@@ -349,7 +334,6 @@ export function createAgent({ complete, taskApiUrl, today = todayString }: Agent
           if (!args) throw new Error("工具参数不是有效的 JSON。");
           result = await runTool(call.function.name, args);
         } catch (error) {
-          // 把失败原因交还给模型，由它向用户解释或换一种做法。
           result = "操作失败：" + errorMessage(error);
         }
         conversation.push({ role: "tool", tool_call_id: call.id, content: result });

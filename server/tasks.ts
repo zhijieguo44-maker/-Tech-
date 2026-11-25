@@ -11,7 +11,6 @@ const createTaskSchema = z.strictObject({
   effort: effortSchema.optional(),
   parentId: z.string().min(1).optional(),
 });
-// dueDate、priority、effort 传 null 表示清除。子任务不能改挂到别的任务下，所以没有 parentId。
 const updateTaskSchema = z
   .strictObject({
     title: title.optional(),
@@ -31,7 +30,6 @@ const fieldErrors: Record<string, string> = {
   parentId: "parentId 需要是所属任务的 id。",
 };
 
-// 指出第一个有问题的字段，调用方（包括智能体）才知道该改什么。
 function describe(error: z.ZodError, fallback: string) {
   const issue = error.issues[0];
   if (issue?.code === "unrecognized_keys") return `不支持的字段：${issue.keys.join("、")}。`;

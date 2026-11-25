@@ -15,7 +15,6 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  // 每收到一次回复就加一，让任务面板重新读取清单。
   const [turn, setTurn] = useState(0);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -35,7 +34,6 @@ export default function App() {
       setDraft(text);
       setError(cause instanceof Error ? `发送失败：${cause.message}` : "发送失败，请重试。");
     } finally {
-      // 即使回复失败，清单也可能已经被改动，所以同样刷新。
       setTurn((count) => count + 1);
       setPending(false);
       requestAnimationFrame(() => input.current?.focus());
