@@ -1,0 +1,104 @@
+openapi: 3.1.0
+info:
+  title: 小明智能体任务 API
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:3000
+paths:
+  /api/tasks:
+    get:
+      operationId: listTasks
+      summary: 按创建顺序列出全部任务，包括已完成任务
+      responses:
+        "200":
+          description: 任务列表；空列表为 []
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Task" }
+    post:
+      operationId: createTask
+      summary: 创建一条未完成任务
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title]
+              properties:
+                title: { $ref: "#/components/schemas/Title" }
+      responses:
+        "201":
+          description: 新建的任务
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/tasks/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      operationId: updateTask
+      summary: 修改标题或完成状态
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                title: { $ref: "#/components/schemas/Title" }
+                done: { type: boolean }
+      responses:
+        "200":
+          description: 更新后的任务
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteTask
+      summary: 删除一条任务
+      responses:
+        "204":
+          description: 删除成功，响应体为空
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  schemas:
+    Title:
+      type: string
+      description: 首尾空白会自动去除，去除后长度应为 1 至 200
+      minLength: 1
+      maxLength: 200
+    Task:
+      type: object
+      required: [id, title, done]
+      properties:
+        id: { type: string, format: uuid }
+        title: { $ref: "#/components/schemas/Title" }
+        done: { type: boolean }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+  responses:
+    BadRequest:
+      description: 请求字段无效
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: 任务不存在
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
